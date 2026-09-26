@@ -33,6 +33,8 @@ export const DEFAULTS = {
   docs: { globs: ["*.md", "docs/**/*.md"], history_globs: ["docs/adr/**", "CHANGELOG.md", "**/CHANGELOG.md"] },
   escalate: { paths: [] as string[] },
   secrets: { allow_users: [] as string[] },
+  // allow_ai_attribution = true: commit-msg stops blocking AI/tool attribution (a team trailer policy).
+  rules: { allow_ai_attribution: false },
   // registry_urls: ecosystem -> URL template for the lock-age lookup (a mirror; "" = no registry).
   security: { gitleaks: true, audit: true, registry_urls: {} as Record<string, string> },
   hooks: { pre_push_test_cmd: "", pre_push_timeout: 60, pre_push_max_tests: 40, block_bypass: true },

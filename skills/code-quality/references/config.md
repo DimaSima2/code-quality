@@ -19,6 +19,7 @@ Sections and keys (defaults in `scripts/lib/config.ts`, `DEFAULTS`):
 - `[docs] globs` - files whose links must resolve; `history_globs` (default `docs/adr/**`,
   `CHANGELOG.md`) - history: it names deleted files and symbols, those files are not checked.
 - `[secrets] allow_users` - home folder names that are not a developer machine.
+- `[rules] allow_ai_attribution` (default `false`) - `true` stops `commit/attribution` in commit-msg, for a team whose policy requires a co-author trailer. The glossary check of the message still runs.
 - `[security] gitleaks`, `audit` - switches for Gitleaks and the dependency audit; both `true` by
   default. `registry_urls` - the URL template per ecosystem for `deps/lock-age`
   (`npm`, `pypi`, `crates`, `go`, `rubygems`, `packagist`, `pub`, `nuget`, `maven`, `deps.dev`),

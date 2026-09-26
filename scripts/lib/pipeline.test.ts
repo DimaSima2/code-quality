@@ -57,6 +57,15 @@ describe("commit-msg", () => {
     const f = commitMsgFindings(noGlossary, "fix: x\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n");
     expect(f.map((x) => x.line)).toContain(3);
   });
+  test("[rules] allow_ai_attribution = true lets an attribution trailer through", () => {
+    const allow = { toml: { ...DEFAULTS, rules: { allow_ai_attribution: true } } } as never;
+    expect(commitMsgFindings(allow, "fix: x\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n")).toEqual([]);
+  });
+  test("allow_ai_attribution is off by default and read from .quality.toml", () => {
+    const f = join(tmp(), "q.toml");
+    writeFileSync(f, "[rules]\nallow_ai_attribution = true\n");
+    expect([DEFAULTS.rules.allow_ai_attribution, loadToml(f).rules.allow_ai_attribution]).toEqual([false, true]);
+  });
   test("product wording and the -v diff below the scissors pass", () => {
     const msg = "provider: sign in with codex subscription tokens\n# ------------------------ >8 ------------------------\n+// Generated with Claude\n";
     expect(commitMsgFindings(noGlossary, msg)).toEqual([]);

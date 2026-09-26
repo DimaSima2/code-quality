@@ -242,7 +242,7 @@ const SCISSORS = /^# -+ >8 -+$/m;
 
 export function commitMsgFindings(o: Opts, text: string): Finding[] {
   const body = text.split(SCISSORS)[0].split("\n").filter((l) => !l.startsWith("#")).join("\n");
-  const attr = ATTRIBUTION.filter((re) => re.test(body)).map((re): Finding => ({ rule: "commit/attribution", file: "COMMIT_EDITMSG", line: lineOf(body, re), msg: `AI/tool attribution: ${re.exec(body)![0].trim().slice(0, 60)}` }));
+  const attr = o.toml.rules.allow_ai_attribution ? [] : ATTRIBUTION.filter((re) => re.test(body)).map((re): Finding => ({ rule: "commit/attribution", file: "COMMIT_EDITMSG", line: lineOf(body, re), msg: `AI/tool attribution: ${re.exec(body)![0].trim().slice(0, 60)}` }));
   const re = o.toml.glossary.commit_msg ? termRegex(avoidTerms(o)) : null;
   const words = re ? body.split("\n").map((t, i) => termFinding(re, { file: "COMMIT_EDITMSG", line: i + 1, text: t })) : [];
   return [...attr, ...words.filter((x): x is Finding => x !== null)];
