@@ -1,6 +1,6 @@
 {
-  "name": "code-quality",
-  "description": "Quality gate plugins for coding agents",
+  "name": "agentura-code-quality",
+  "description": "Agentura fork of smixs/code-quality: [rules] allow_ai_attribution, no gate without .quality.toml",
   "owner": {
     "name": "Sergey Shima"
   },
@@ -8,7 +8,7 @@
     {
       "name": "code-quality",
       "source": "./",
-      "version": "1.2.2",
+      "version": "1.2.2+agentura.1",
       "description": "Quality gate for agent and git changes"
     }
   ]
