@@ -3,6 +3,9 @@
 # Both the gate and the repo's own pre-push (Git LFS uploads objects here) read the pushed refs on
 # stdin, so it is kept in a file and fed to each.
 here=$(dirname "$0")
+# No .quality.toml at this worktree root = no gate here (other branches and worktrees of a shared
+# core.hooksPath); the repo's own hook still runs.
+[ -f "$(git rev-parse --show-toplevel)/.quality.toml" ] || exec "$here/_chain" pre-push "$@"
 refs=$(mktemp) || exit 1
 trap 'rm -f "$refs"' EXIT
 cat > "$refs"

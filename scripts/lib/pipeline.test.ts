@@ -243,6 +243,19 @@ describe("install-hooks chains the repo's own hooks", () => {
     expect(sh(repo, "git push -q origin HEAD:refs/heads/main").status).not.toBe(0);
   }, 120_000);
 
+  test("a worktree without .quality.toml gets no gate; its own hooks still run; a configured one is judged", () => {
+    const repo = tmp();
+    const msg = "fix: x\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n";
+    const commitMsg = (dir: string) => sh(dir, `git -c user.name=t -c user.email=t@t commit -q --allow-empty -m "${msg}"`);
+    sh(repo, "git init -q");
+    hook(join(repo, ".git/hooks"), "commit-msg", "touch .git/own-commit-msg-ran");
+    q("install-hooks", repo);
+    const bare = commitMsg(repo);
+    writeFileSync(join(repo, ".quality.toml"), "[security]\ngitleaks = false\naudit = false\n");
+    const configured = commitMsg(repo);
+    expect([bare.status, existsSync(join(repo, ".git/own-commit-msg-ran")), configured.status, configured.stderr]).toEqual([0, true, 1, expect.stringContaining("commit/attribution")]);
+  }, 60_000);
+
   test("a previous core.hooksPath (husky) is chained and restored by uninstall-hooks", () => {
     const repo = tmp();
     sh(repo, "git init -q && git config core.hooksPath .husky");

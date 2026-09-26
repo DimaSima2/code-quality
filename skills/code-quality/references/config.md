@@ -68,7 +68,7 @@ The list of guarded keys and the rule for changing them together with sources is
 ## Git hooks
 
 
-`install-hooks <repo>` writes a stable `core.hooksPath` under `~/.local/share/code-quality/git-hooks/` (override with `CODE_QUALITY_HOME`). Its `hooks-root` names the plugin copy the hooks run: the newest copy invoked on this machine, or the last one when that copy is gone (`root`). The repo's own hooks (Git LFS, husky, anything else) keep working: every wrapper calls the previous hook with the same arguments and returns its exit code. `uninstall-hooks <repo>` puts the old value back. `[hooks] block_bypass = false` disables the agent shell guard; the default is `true`.
+`install-hooks <repo>` writes a stable `core.hooksPath` under `~/.local/share/code-quality/git-hooks/` (override with `CODE_QUALITY_HOME`). Its `hooks-root` names the plugin copy the hooks run: the newest copy invoked on this machine, or the last one when that copy is gone (`root`). The repo's own hooks (Git LFS, husky, anything else) keep working: every wrapper calls the previous hook with the same arguments and returns its exit code. A gate hook (pre-commit, commit-msg, pre-push) in a worktree whose root has no `.quality.toml` only runs the repo's own hook: `core.hooksPath` is shared by every worktree of a clone, and a branch that has no config yet gets no gate. `uninstall-hooks <repo>` puts the old value back. `[hooks] block_bypass = false` disables the agent shell guard; the default is `true`.
 
 ## Stop hooks
 

@@ -2,6 +2,9 @@
 # code-quality commit-msg: blocks AI/tool attribution lines (and glossary Avoid words when configured).
 # Own verdict first; green = the repo's own commit-msg runs (hooks/_chain).
 here=$(dirname "$0")
+# No .quality.toml at this worktree root = no gate here (other branches and worktrees of a shared
+# core.hooksPath); the repo's own hook still runs.
+[ -f "$(git rev-parse --show-toplevel)/.quality.toml" ] || exec "$here/_chain" commit-msg "$@"
 # The newest plugin copy invoked on this machine (hooks.ts updatePluginRoot); the last one if it is gone.
 root=$(cat "$here/../hooks-root" 2>/dev/null)
 [ -f "$root/scripts/quality.ts" ] || root=$(cat "$here/../root") || exit 2
