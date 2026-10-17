@@ -53,9 +53,10 @@ function inProjectDirs(dirs: string[], file: string) {
 
 export type TamperContext = { allowFile?: boolean; commitMessages?: string; configBefore?: string; configAfter?: string };
 // `qg:test-removed <reason>` lifts tamper/test-deleted. A `qg:test-removed-name <name>` line below it
-// (one per deleted test, "name" = title for it(...)/test(...), function/class name for py def/class)
+// (one per deleted definition, "name" = title for it(...)/test(...)/describe(...), or the
+// function/class/const/let name for everything else - helpers, fixtures, stub classes, constants)
 // also lifts tamper/assertion-weakened, but only for a pure-deletion hunk (no added lines) whose
-// every removed test definition is named; a mixed hunk or an unnamed removed test still blocks.
+// every top-level removed definition is named; a mixed hunk or an unnamed one still blocks.
 type AcceptedBypass = { source: BypassSource; reason: string; names: string[] };
 
 export function tamperCheck(o: Opts, ch: Changes, context: TamperContext = {}) {
@@ -342,7 +343,7 @@ type HunkContext = { h: DiffHunk; sourceHarnessMoved: boolean; fileDeleted: bool
 function assertionOutcome(o: Opts, file: string, ctx: HunkContext, bypass: AcceptedBypass | null): AssertionOutcome {
   const { h, sourceHarnessMoved, fileDeleted } = ctx;
   const adapter = adapterForFile(o.langs, file)!;
-  const exemptDefs = assertionExemption(adapter, h, bypass, fileDeleted);
+  const exemptDefs = assertionExemption(o, file, adapter, h, bypass, fileDeleted);
   if (exemptDefs) return exemptionOutcome(h, adapter, bypass!, exemptDefs);
   const fewer = !sourceHarnessMoved && countPattern(h.removed, adapter, "assert") > countPattern(h.added, adapter, "assert");
   const weaker = assertionReplacement(h);
@@ -351,48 +352,122 @@ function assertionOutcome(o: Opts, file: string, ctx: HunkContext, bypass: Accep
   return { finding: finding("tamper/assertion-weakened", file, h.newStart, why) };
 }
 
-// A pure-deletion hunk (no added lines) where every deleted test definition is named by
-// `qg:test-removed-name` is exempt from assertion-weakened; a mixed hunk or an unnamed test is not.
-// A whole-file deletion (file no longer exists in HEAD) has no neighbour whose tail could slide in
-// under the named test's cover, so it skips the header-opening check below. Otherwise the hunk must
-// open with the first removed test's header: everything removed before it may only be blank lines,
-// comments, or decorators/annotations, never a tail of a prior test (e.g. its last assertions).
-function assertionExemption(adapter: LanguageAdapter, h: DiffHunk, bypass: AcceptedBypass | null, fileDeleted: boolean): string[] | null {
+// A pure-deletion hunk (no added lines) where every top-level definition removed by it - a test,
+// but also a helper, fixture, stub class, or constant it shares the hunk with - is named by
+// `qg:test-removed-name` is exempt from assertion-weakened; a mixed hunk or an unnamed definition
+// is not. "Top-level" = the indent of the hunk's own first line (L); a decorator or comment above
+// the first definition is noise, everything indented past L is that definition's body (skipped,
+// not required to be named), and a bare closing bracket/brace left over from a multi-line body is
+// noise too, once at least one definition has been found. A whole-file deletion (file no longer
+// exists in HEAD) has no neighbour whose tail could slide in under a named definition's cover, so
+// it skips the "hunk opens on a definition" guard below and tolerates other top-level statements
+// (imports, a module docstring) that are not themselves named definitions. Otherwise the check
+// also walks upward from the gap the hunk left, past blank lines, to the nearest surviving line:
+// if the hunk's own indent is no deeper than that line's, or that line is unindented and does not
+// open a block, the hunk owns the removal; if the hunk's content is actually just the tail of a
+// kept definition's body (nested deeper than that surviving line, or than a prior line the hunk
+// never got to close), it is not, and the exemption is denied.
+function assertionExemption(o: Opts, file: string, adapter: LanguageAdapter, h: DiffHunk, bypass: AcceptedBypass | null, fileDeleted: boolean): string[] | null {
   const names = bypass?.names ?? [];
-  if (!names.length || h.added.size > 0 || h.removed.size === 0) return null;
-  const defs = testDefinitionNames(adapter, h.removed);
+  if (!NAME_ADAPTERS.has(adapter.id) || !names.length || h.added.size > 0 || h.removed.size === 0) return null;
+  const removed = orderedLines(h.removed);
+  const level = hunkLevel(adapter, removed);
+  if (level === null) return null;
+  const defs = removalDefinitions(adapter, removed, level, fileDeleted);
   if (!defs || !defs.length) return null;
   if (!defs.every((name) => nameListed(names, name))) return null;
-  return fileDeleted || hunkOpensOnHeader(adapter, h.removed) ? defs : null;
+  if (fileDeleted) return defs;
+  return hunkOpensInOwnScope(o, file, adapter, h.newStart, level) ? defs : null;
 }
 
-// Noise lines (blank, comment, decorator/annotation) are allowed before the first removed test
-// header; anything else (e.g. a leftover assertion from the preceding test) blocks the exemption.
-// A Python decorator call that wraps onto multiple lines (e.g. `@pytest.mark.parametrize(` with
-// its argument list closing several lines later) keeps every continuation line as noise too, by
-// tracking paren balance from the line that opened with `@`.
-function hunkOpensOnHeader(adapter: LanguageAdapter, lines: Map<number, string>): boolean {
-  const ordered = orderedLines(lines);
-  const headerIndex = ordered.findIndex((line) => matchesTestPattern(adapter, "test", activeTestHeader(line)));
-  if (headerIndex < 0) return false;
-  return allNoise(adapter, ordered.slice(0, headerIndex));
+function indentOf(line: string): number {
+  return line.length - line.trimStart().length;
 }
 
-function allNoise(adapter: LanguageAdapter, lines: string[]): boolean {
-  let openDepth = 0;
-  for (const rawLine of lines) {
-    if (openDepth > 0) {
-      openDepth += parenDelta(rawLine);
+function hunkLevel(adapter: LanguageAdapter, lines: string[]): number | null {
+  let i = 0;
+  while (i < lines.length) {
+    const raw = lines[i];
+    if (raw.trim() === "") {
+      i++;
       continue;
     }
-    const line = rawLine.trim();
-    if (adapter.id === "py" && line.startsWith("@")) {
-      openDepth = Math.max(0, parenDelta(rawLine));
+    if (adapter.id === "py" && raw.trim().startsWith("@")) {
+      i = skipDecorator(lines, i);
       continue;
     }
-    if (!isNoiseLine(adapter, rawLine)) return false;
+    if (isNoiseLine(adapter, raw)) {
+      i++;
+      continue;
+    }
+    return indentOf(raw);
   }
-  return true;
+  return null;
+}
+
+// Walks the removed lines top to bottom: a line indented past `level` is some definition's body
+// (skipped, never required to be named); a blank or comment line at `level` is noise; a Python
+// decorator at `level` (its multi-line call included, tracked by paren balance) is noise too; a
+// bare closing bracket/brace at `level` is a multi-line body's tail and noise once a definition has
+// already been found; anything else at `level` must itself be a definition, or the whole hunk is
+// unrecognized - in a lenient (whole-file) scan that line is just skipped, otherwise the scan fails.
+function removalDefinitions(adapter: LanguageAdapter, lines: string[], level: number, lenient: boolean): string[] | null {
+  const defs: string[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const raw = lines[i];
+    if (raw.trim() === "") {
+      i++;
+      continue;
+    }
+    const indent = indentOf(raw);
+    if (indent > level) {
+      i++;
+      continue;
+    }
+    if (indent < level) {
+      if (lenient) {
+        i++;
+        continue;
+      }
+      return null;
+    }
+    const trimmed = raw.trim();
+    if (adapter.id === "py" && trimmed.startsWith("@")) {
+      i = skipDecorator(lines, i);
+      continue;
+    }
+    if (isNoiseLine(adapter, raw)) {
+      i++;
+      continue;
+    }
+    const name = definitionName(adapter, trimmed);
+    if (name) {
+      defs.push(name);
+      i++;
+      continue;
+    }
+    if (isClosingNoise(trimmed) && defs.length > 0) {
+      i++;
+      continue;
+    }
+    if (lenient) {
+      i++;
+      continue;
+    }
+    return null;
+  }
+  return defs;
+}
+
+function skipDecorator(lines: string[], i: number): number {
+  let depth = Math.max(0, parenDelta(lines[i]));
+  let j = i + 1;
+  while (depth > 0 && j < lines.length) {
+    depth += parenDelta(lines[j]);
+    j++;
+  }
+  return j;
 }
 
 function parenDelta(line: string): number {
@@ -404,12 +479,64 @@ function parenDelta(line: string): number {
   return depth;
 }
 
+const isClosingNoise = (trimmed: string) => /^[)\]}]+[;,]?$/.test(trimmed);
+
 // Only reached for NAME_ADAPTERS ("ts", "py"); each has its own decorator/comment syntax.
 function isNoiseLine(adapter: LanguageAdapter, rawLine: string): boolean {
   const line = rawLine.trim();
   if (line === "") return true;
   if (adapter.id === "py") return line.startsWith("@") || line.startsWith("#");
   return line.startsWith("//") || line.startsWith("/*") || line.startsWith("*") || line.endsWith("*/");
+}
+
+function definitionName(adapter: LanguageAdapter, trimmed: string): string {
+  return adapter.id === "py" ? pyDefinitionName(trimmed) : tsAnyDefinitionName(adapter, trimmed);
+}
+
+function pyDefinitionName(line: string): string {
+  return /^(?:async\s+)?def\s+(\w+)/.exec(line)?.[1]
+    ?? /^class\s+(\w+)/.exec(line)?.[1]
+    ?? /^([A-Za-z_]\w*)\s*(?::[^=\n]+)?=(?!=)/.exec(line)?.[1]
+    ?? "";
+}
+
+function tsAnyDefinitionName(adapter: LanguageAdapter, line: string): string {
+  if (matchesTestPattern(adapter, "test", activeTestHeader(line))) return tsDefinitionName(line);
+  return /^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s+(\w+)/.exec(line)?.[1]
+    ?? /^(?:export\s+)?(?:const|let)\s+(\w+)/.exec(line)?.[1]
+    ?? /^(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+(\w+)/.exec(line)?.[1]
+    ?? "";
+}
+
+const tsDefinitionName = (line: string) => /\(\s*["'`]([^"'`]+)["'`]/.exec(line)?.[1] ?? "";
+
+// The nearest surviving line above the gap the hunk left (blank lines skipped, comments count):
+// the hunk owns its own scope if it is no more indented than that line, or that line sits at column
+// 0 and does not open a block of its own (a trailing `:` in Python, an unclosed `{` in TS/JS) - the
+// common case of one definition's close followed immediately by the next definition's (or the
+// hunk's) open. Otherwise the removed content is nested inside a body that line still has open
+// (e.g. a kept class whose method the hunk deletes), so the hunk is not acting in its own scope.
+function hunkOpensInOwnScope(o: Opts, file: string, adapter: LanguageAdapter, newStart: number, level: number): boolean {
+  const prev = previousRemainingLine(o, file, newStart);
+  if (prev === null) return true;
+  if (level <= indentOf(prev)) return true;
+  return indentOf(prev) === 0 && !opensBlock(adapter, prev);
+}
+
+function previousRemainingLine(o: Opts, file: string, newStart: number): string | null {
+  if (newStart <= 0) return null;
+  const path = join(o.repo, file);
+  if (!existsSync(path)) return null;
+  const lines = readFileSync(path, "utf8").split("\n");
+  for (let i = newStart - 1; i >= 0; i--) {
+    if (lines[i] !== undefined && lines[i].trim() !== "") return lines[i];
+  }
+  return null;
+}
+
+function opensBlock(adapter: LanguageAdapter, line: string): boolean {
+  const trimmed = line.trimEnd();
+  return adapter.id === "py" ? trimmed.endsWith(":") : trimmed.endsWith("{");
 }
 
 function exemptionOutcome(h: DiffHunk, adapter: LanguageAdapter, bypass: AcceptedBypass, defs: string[]): AssertionOutcome {
@@ -423,16 +550,6 @@ function nameListed(names: string[], defName: string) {
 }
 
 const NAME_ADAPTERS = new Set(["ts", "py"]);
-
-// null = this language has no definition-name adapter, so no exemption is possible for it.
-function testDefinitionNames(adapter: LanguageAdapter, lines: Map<number, string>): string[] | null {
-  if (!NAME_ADAPTERS.has(adapter.id)) return null;
-  const headers = testHeaders(lines, adapter);
-  return adapter.id === "py" ? headers.map(pyDefinitionName).filter(Boolean) : headers.map(tsDefinitionName).filter(Boolean);
-}
-
-const pyDefinitionName = (line: string) => /^\s*(?:def|class)\s+(\w+)/.exec(line)?.[1] ?? "";
-const tsDefinitionName = (line: string) => /\(\s*["'`]([^"'`]+)["'`]/.exec(line)?.[1] ?? "";
 
 function assertionReplacement(h: DiffHunk) {
   const removed = joined(h.removed);
