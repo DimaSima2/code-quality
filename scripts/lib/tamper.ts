@@ -349,12 +349,33 @@ function assertionOutcome(o: Opts, file: string, ctx: HunkContext, bypass: Accep
 
 // A pure-deletion hunk (no added lines) where every deleted test definition is named by
 // `qg:test-removed-name` is exempt from assertion-weakened; a mixed hunk or an unnamed test is not.
+// The hunk must also open with the first removed test's header: everything removed before it
+// may only be blank lines, comments, or decorators/annotations, never a tail of a prior test
+// (e.g. its last assertions) sliding in under the named test's cover.
 function assertionExemption(adapter: LanguageAdapter, h: DiffHunk, bypass: AcceptedBypass | null): string[] | null {
   const names = bypass?.names ?? [];
   if (!names.length || h.added.size > 0 || h.removed.size === 0) return null;
   const defs = testDefinitionNames(adapter, h.removed);
   if (!defs || !defs.length) return null;
-  return defs.every((name) => nameListed(names, name)) ? defs : null;
+  if (!defs.every((name) => nameListed(names, name))) return null;
+  return hunkOpensOnHeader(adapter, h.removed) ? defs : null;
+}
+
+// Noise lines (blank, comment, decorator/annotation) are allowed before the first removed test
+// header; anything else (e.g. a leftover assertion from the preceding test) blocks the exemption.
+function hunkOpensOnHeader(adapter: LanguageAdapter, lines: Map<number, string>): boolean {
+  const ordered = orderedLines(lines);
+  const headerIndex = ordered.findIndex((line) => matchesTestPattern(adapter, "test", activeTestHeader(line)));
+  if (headerIndex < 0) return false;
+  return ordered.slice(0, headerIndex).every((line) => isNoiseLine(adapter, line));
+}
+
+// Only reached for NAME_ADAPTERS ("ts", "py"); each has its own decorator/comment syntax.
+function isNoiseLine(adapter: LanguageAdapter, rawLine: string): boolean {
+  const line = rawLine.trim();
+  if (line === "") return true;
+  if (adapter.id === "py") return line.startsWith("@") || line.startsWith("#");
+  return line.startsWith("//") || line.startsWith("/*") || line.startsWith("*") || line.endsWith("*/");
 }
 
 function exemptionOutcome(h: DiffHunk, adapter: LanguageAdapter, bypass: AcceptedBypass, defs: string[]): AssertionOutcome {
@@ -385,8 +406,12 @@ function assertionReplacement(h: DiffHunk) {
   return CALL_WEAKENINGS.some((pair) => pairedCall(removed, added, pair.strong, pair.weak)) || bareAssertWeakened(h);
 }
 
+function orderedLines(lines: Map<number, string>): string[] {
+  return [...lines].toSorted(([a], [b]) => a - b).map(([, line]) => line);
+}
+
 function joined(lines: Map<number, string>) {
-  return [...lines].toSorted(([a], [b]) => a - b).map(([, line]) => line).join("\n");
+  return orderedLines(lines).join("\n");
 }
 
 function pairedCall(removed: string, added: string, strong: RegExp, weak: RegExp) {
