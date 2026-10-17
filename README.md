@@ -66,12 +66,14 @@ qg:test-removed-name old queue behavior
 qg:test-removed-name retry backoff
 ```
 
-A name is the test's title for `it(...)`/`test(...)`/`describe(...)`, or the function/class name
-for a Python `def`/`class`. The exemption only covers a hunk that is a pure deletion (no added
-lines) where every removed test definition in that hunk is named; a hunk that still has added
-lines, or deletes a test that is not named, is judged as before. Python and TypeScript/JavaScript
-read test definitions; other languages keep the plain `qg:test-removed` behavior with no
-assertion-weakened exemption.
+A name is the test's title for `it(...)`/`test(...)`/`describe(...)`, or the function/class/const/let
+name for everything else removed alongside it - a helper, a fixture, a stub class, a constant.
+The exemption only covers a hunk that is a pure deletion (no added lines) where every top-level
+definition in that hunk (every test *and* every helper, fixture, stub class, or constant sharing
+it) is named; a hunk that still has added lines, deletes a definition that is not named, or starts
+mid-way through a definition that survives (a prior test's tail, or a method nested in a class that
+is still there afterward) is judged as before. Python and TypeScript/JavaScript read definitions;
+other languages keep the plain `qg:test-removed` behavior with no assertion-weakened exemption.
 
 ## How it works
 
