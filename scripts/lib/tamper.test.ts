@@ -53,6 +53,26 @@ function tamper(repo: string) {
 
 const rules = (repo: string) => tamper(repo).findings.map((f) => f.rule);
 
+function removedMarker(reason: string, names: string[] = []) {
+  const lines = [
+    ["qg:test", `-removed ${reason}`].join(""),
+    ...names.map((name) => ["qg:test", `-removed-name ${name}`].join("")),
+  ];
+  return `${lines.join("\n")}\n`;
+}
+
+function langRepo(lang: string, manifest: [string, string], files: Record<string, string> = {}) {
+  const repo = mkdtempSync(join(tmpdir(), `qg-tamper-${lang}-`));
+  dirs.push(repo);
+  git(repo, "init", "-q");
+  write(repo, ".gitignore", ".scratch/\n");
+  write(repo, ".quality.toml", `[project]\nlanguage = "${lang}"\nsrc = ["."]\nbase = "HEAD"\n`);
+  write(repo, manifest[0], manifest[1]);
+  for (const [file, text] of Object.entries(files)) write(repo, file, text);
+  commit(repo, "initial");
+  return repo;
+}
+
 describe("tamper/inline-suppression", () => {
   for (const [file, line] of [["evidence-eslint-disable-codex.ts", 1], ["evidence-eslint-disable-next-line.ts", 1]] as const) {
     test(`flags ${file} at its added directive`, () => {
@@ -346,6 +366,102 @@ describe("tamper/assertion-weakened", () => {
     });
     write(repo, "src/value.test.ts", 'test("old behavior", () => {\n  assert.equal(value, 1);\n});\n');
     write(repo, "src/value.behavior.test.ts", 'test("new behavior", () => {\n  assert.equal(first, 1);\n  assert.equal(second, 2);\n});\n');
+    git(repo, "add", "-A");
+    expect(rules(repo)).toContain("tamper/assertion-weakened");
+  });
+});
+
+describe("tamper/assertion-weakened removal bypass", () => {
+  test("blocks a pure deletion of a named test with no marker at all", () => {
+    const repo = tsRepo({
+      "src/value.test.ts": 'test("removed one", () => {\n  assert.equal(a, 1);\n});\ntest("kept", () => {\n  assert.equal(c, 3);\n});\n',
+    });
+    write(repo, "src/value.test.ts", 'test("kept", () => {\n  assert.equal(c, 3);\n});\n');
+    git(repo, "add", "-A");
+    expect(rules(repo)).toContain("tamper/assertion-weakened");
+  });
+
+  test("lifts assertion-weakened for a pure deletion naming every removed test, from allow.md", () => {
+    const repo = tsRepo({
+      "src/value.test.ts": 'test("removed one", () => {\n  assert.equal(a, 1);\n  assert.equal(b, 2);\n});\ntest("kept", () => {\n  assert.equal(c, 3);\n});\n',
+    });
+    write(repo, "src/value.test.ts", 'test("kept", () => {\n  assert.equal(c, 3);\n});\n');
+    write(repo, ".scratch/quality/allow.md", removedMarker("migrated to the new primitive", ["removed one"]));
+    git(repo, "add", "-A");
+    const result = tamper(repo);
+    expect(result.findings.map((f) => f.rule)).not.toContain("tamper/assertion-weakened");
+    expect(result.notices.some((n) => n.startsWith("note: bypass tamper/assertion-weakened allow.md") && n.includes("2 assert") && n.includes("removed one"))).toBe(true);
+  });
+
+  test("lifts assertion-weakened for a pure deletion naming every removed test, from the commit message", () => {
+    const repo = tsRepo({ "src/value.test.ts": 'test("removed one", () => {\n  assert.equal(a, 1);\n});\ntest("kept", () => {\n  assert.equal(c, 3);\n});\n' });
+    const before = git(repo, "rev-parse", "HEAD");
+    write(repo, "src/value.test.ts", 'test("kept", () => {\n  assert.equal(c, 3);\n});\n');
+    commit(repo, removedMarker("migrated to the new primitive", ["removed one"]));
+    const o = buildOpts(readArgs(["check", "--repo", repo, "--since", before, "--no-deps"]));
+    const result = tamperCheck(o, changes(o));
+    expect(result.findings.map((f) => f.rule)).not.toContain("tamper/assertion-weakened");
+    expect(result.notices.some((n) => n.startsWith("note: bypass tamper/assertion-weakened commit-msg") && n.includes("removed one"))).toBe(true);
+  });
+
+  test("still blocks a bare marker with no -name line", () => {
+    const repo = tsRepo({
+      "src/value.test.ts": 'test("removed one", () => {\n  assert.equal(a, 1);\n});\ntest("kept", () => {\n  assert.equal(c, 3);\n});\n',
+    });
+    write(repo, "src/value.test.ts", 'test("kept", () => {\n  assert.equal(c, 3);\n});\n');
+    write(repo, ".scratch/quality/allow.md", removedMarker("migrated to the new primitive"));
+    git(repo, "add", "-A");
+    expect(rules(repo)).toContain("tamper/assertion-weakened");
+  });
+
+  test("still blocks a hunk whose removed assertion was not inside a named test definition", () => {
+    const repo = tsRepo({
+      "src/value.test.ts": 'test("kept", () => {\n  assert.equal(a, 1);\n  assert.equal(b, 2);\n});\n',
+    });
+    write(repo, "src/value.test.ts", 'test("kept", () => {\n  assert.equal(a, 1);\n});\n');
+    write(repo, ".scratch/quality/allow.md", removedMarker("cleanup", ["kept"]));
+    git(repo, "add", "-A");
+    expect(rules(repo)).toContain("tamper/assertion-weakened");
+  });
+
+  test("still blocks a hunk removing two tests when only one is named", () => {
+    const repo = tsRepo({
+      "src/value.test.ts": 'test("removed one", () => { assert.equal(a, 1); });\ntest("removed two", () => { assert.equal(b, 2); });\ntest("kept", () => { assert.equal(c, 3); });\n',
+    });
+    write(repo, "src/value.test.ts", 'test("kept", () => { assert.equal(c, 3); });\n');
+    write(repo, ".scratch/quality/allow.md", removedMarker("partial cleanup", ["removed one"]));
+    git(repo, "add", "-A");
+    expect(rules(repo)).toContain("tamper/assertion-weakened");
+  });
+
+  test("still blocks a mixed hunk even when the removed test is named", () => {
+    const repo = tsRepo({
+      "src/value.test.ts": 'test("removed one", () => {\n  assert.equal(a, 1);\n});\ntest("kept", () => {\n  assert.equal(c, 3);\n});\n',
+    });
+    write(repo, "src/value.test.ts", '// replaced by a new helper\ntest("kept", () => {\n  assert.equal(c, 3);\n});\n');
+    write(repo, ".scratch/quality/allow.md", removedMarker("migrated", ["removed one"]));
+    git(repo, "add", "-A");
+    expect(rules(repo)).toContain("tamper/assertion-weakened");
+  });
+
+  test("lifts assertion-weakened for a pure deletion of a named Python test", () => {
+    const repo = langRepo("py", ["pyproject.toml", '[project]\nname = "rules"\nversion = "0.1.0"\n'], {
+      "test_value.py": "def test_removed():\n    assert value == 1\n    assert other == 2\n\n\ndef test_kept():\n    assert value == 1\n",
+    });
+    write(repo, "test_value.py", "def test_kept():\n    assert value == 1\n");
+    write(repo, ".scratch/quality/allow.md", removedMarker("migrated to the new primitive", ["test_removed"]));
+    git(repo, "add", "-A");
+    const result = tamper(repo);
+    expect(result.findings.map((f) => f.rule)).not.toContain("tamper/assertion-weakened");
+    expect(result.notices.some((n) => n.startsWith("note: bypass tamper/assertion-weakened allow.md") && n.includes("test_removed"))).toBe(true);
+  });
+
+  test("never exempts a language with no test-definition adapter", () => {
+    const repo = langRepo("go", ["go.mod", "module example.test/tamper\n"], {
+      "value_test.go": "package value\nfunc TestRemoved(t *testing.T) {\n\tassert.Equal(t, 1, 1)\n\tassert.Equal(t, 2, 2)\n}\n\nfunc TestKept(t *testing.T) {\n\tassert.Equal(t, 3, 3)\n}\n",
+    });
+    write(repo, "value_test.go", "package value\nfunc TestKept(t *testing.T) {\n\tassert.Equal(t, 3, 3)\n}\n");
+    write(repo, ".scratch/quality/allow.md", removedMarker("migrated to the new primitive", ["TestRemoved"]));
     git(repo, "add", "-A");
     expect(rules(repo)).toContain("tamper/assertion-weakened");
   });
