@@ -500,6 +500,63 @@ describe("tamper/assertion-weakened removal bypass", () => {
     expect(rules(repo)).not.toContain("tamper/assertion-weakened");
   });
 
+  test("lifts assertion-weakened for a whole deleted TypeScript test file naming every test", () => {
+    const repo = tsRepo({
+      "src/value.test.ts":
+        '/**\n * value tests\n */\nimport { test } from "node:test";\n\ntest("removed one", () => {\n  assert.equal(a, 1);\n});\ntest("removed two", () => {\n  assert.equal(b, 2);\n});\n',
+    });
+    rmSync(join(repo, "src/value.test.ts"));
+    write(repo, ".scratch/quality/allow.md", removedMarker("migrated to the new primitive", ["removed one", "removed two"]));
+    git(repo, "add", "-A");
+    const result = tamper(repo);
+    expect(result.findings.map((f) => f.rule)).not.toContain("tamper/assertion-weakened");
+    expect(result.findings.map((f) => f.rule)).not.toContain("tamper/test-deleted");
+  });
+
+  test("still blocks a whole deleted TypeScript test file when one test is not named", () => {
+    const repo = tsRepo({
+      "src/value.test.ts":
+        'import { test } from "node:test";\n\ntest("removed one", () => {\n  assert.equal(a, 1);\n});\ntest("removed two", () => {\n  assert.equal(b, 2);\n});\n',
+    });
+    rmSync(join(repo, "src/value.test.ts"));
+    write(repo, ".scratch/quality/allow.md", removedMarker("migrated to the new primitive", ["removed one"]));
+    git(repo, "add", "-A");
+    expect(rules(repo)).toContain("tamper/assertion-weakened");
+  });
+
+  test("lifts assertion-weakened for a whole deleted Python test file with a module docstring naming every test", () => {
+    const repo = langRepo("py", ["pyproject.toml", '[project]\nname = "rules"\nversion = "0.1.0"\n'], {
+      "test_value.py": '"""Module docstring."""\nimport pytest\n\n\ndef test_removed():\n    assert value == 1\n',
+    });
+    rmSync(join(repo, "test_value.py"));
+    write(repo, ".scratch/quality/allow.md", removedMarker("migrated to the new primitive", ["test_removed"]));
+    git(repo, "add", "-A");
+    const result = tamper(repo);
+    expect(result.findings.map((f) => f.rule)).not.toContain("tamper/assertion-weakened");
+  });
+
+  test("lifts assertion-weakened when a multi-line parametrize decorator precedes the named Python test header", () => {
+    const repo = langRepo("py", ["pyproject.toml", '[project]\nname = "rules"\nversion = "0.1.0"\n'], {
+      "test_value.py":
+        "def test_kept_a():\n    assert value == 1\n\n\n@pytest.mark.parametrize(\n    \"x\",\n    [1, 2, 3],\n)\ndef test_removed(x):\n    assert x > 0\n\n\ndef test_kept():\n    assert value == 1\n",
+    });
+    write(repo, "test_value.py", "def test_kept_a():\n    assert value == 1\n\n\ndef test_kept():\n    assert value == 1\n");
+    write(repo, ".scratch/quality/allow.md", removedMarker("migrated", ["test_removed"]));
+    git(repo, "add", "-A");
+    expect(rules(repo)).not.toContain("tamper/assertion-weakened");
+  });
+
+  test("still blocks a hunk whose removed lines start with a prior test's tail before a decorator-covered named test header", () => {
+    const repo = langRepo("py", ["pyproject.toml", '[project]\nname = "rules"\nversion = "0.1.0"\n'], {
+      "test_value.py":
+        "def test_kept_a():\n    assert value == 1\n    assert other == 2\n\n\n@pytest.mark.parametrize(\n    \"x\",\n    [1, 2, 3],\n)\ndef test_removed(x):\n    assert x > 0\n\n\ndef test_kept():\n    assert value == 1\n",
+    });
+    write(repo, "test_value.py", "def test_kept_a():\n    assert value == 1\n\n\ndef test_kept():\n    assert value == 1\n");
+    write(repo, ".scratch/quality/allow.md", removedMarker("migrated", ["test_removed"]));
+    git(repo, "add", "-A");
+    expect(rules(repo)).toContain("tamper/assertion-weakened");
+  });
+
   test("never exempts a language with no test-definition adapter", () => {
     const repo = langRepo("go", ["go.mod", "module example.test/tamper\n"], {
       "value_test.go": "package value\nfunc TestRemoved(t *testing.T) {\n\tassert.Equal(t, 1, 1)\n\tassert.Equal(t, 2, 2)\n}\n\nfunc TestKept(t *testing.T) {\n\tassert.Equal(t, 3, 3)\n}\n",
