@@ -676,6 +676,52 @@ describe("tamper/assertion-weakened removal bypass naming helpers, fixtures, stu
   });
 });
 
+describe("tamper/assertion-weakened removal bypass across multi-line headers, nested definitions, and leading blanks", () => {
+  test("lifts assertion-weakened when a nested def inside a named helper's multi-line signature does not need its own name", () => {
+    const repo = langRepo("py", ["pyproject.toml", '[project]\nname = "rules"\nversion = "0.1.0"\n'], {
+      "test_value.py":
+        "def helper_removed(\n    a: int,\n    b: int,\n) -> int:\n    def _inner():\n        assert a >= 0\n        return a + b\n    return _inner()\n\n\ndef test_kept():\n    assert True\n",
+    });
+    write(repo, "test_value.py", "def test_kept():\n    assert True\n");
+    write(repo, ".scratch/quality/allow.md", removedMarker("dropped the dead helper", ["helper_removed"]));
+    git(repo, "add", "-A");
+    expect(rules(repo)).not.toContain("tamper/assertion-weakened");
+  });
+
+  test("lifts assertion-weakened when removed lines open with blank lines before a named class with nested methods", () => {
+    const repo = langRepo("py", ["pyproject.toml", '[project]\nname = "rules"\nversion = "0.1.0"\n'], {
+      "test_value.py":
+        "def test_kept_a():\n    assert value == 1\n\n\n\n\nclass _FakeClock:\n    def __init__(self):\n        self.now = 0\n\n    def tick(self):\n        def _step():\n            assert self.now >= 0\n            return 1\n        self.now += _step()\n\n\ndef test_kept():\n    assert value == 1\n",
+    });
+    write(repo, "test_value.py", "def test_kept_a():\n    assert value == 1\n\n\ndef test_kept():\n    assert value == 1\n");
+    write(repo, ".scratch/quality/allow.md", removedMarker("dropped the fake clock", ["_FakeClock"]));
+    git(repo, "add", "-A");
+    expect(rules(repo)).not.toContain("tamper/assertion-weakened");
+  });
+
+  test("lifts assertion-weakened when a multi-line parametrize decorator has a quoted argument containing a stray paren", () => {
+    const repo = langRepo("py", ["pyproject.toml", '[project]\nname = "rules"\nversion = "0.1.0"\n'], {
+      "test_value.py":
+        "def test_kept_a():\n    assert value == 1\n\n\n@pytest.mark.parametrize(\n    \"label\",\n    [\"weird(name\"],\n)\ndef test_removed(\n    label,\n) -> None:\n    assert label\n\n\ndef test_kept():\n    assert value == 1\n",
+    });
+    write(repo, "test_value.py", "def test_kept_a():\n    assert value == 1\n\n\ndef test_kept():\n    assert value == 1\n");
+    write(repo, ".scratch/quality/allow.md", removedMarker("migrated", ["test_removed"]));
+    git(repo, "add", "-A");
+    expect(rules(repo)).not.toContain("tamper/assertion-weakened");
+  });
+
+  test("lifts assertion-weakened when a named TypeScript test contains a nested function", () => {
+    const repo = tsRepo({
+      "src/value.test.ts":
+        'test("removed one", () => {\n  function inner() {\n    return 1;\n  }\n  assert.equal(inner(), 1);\n});\ntest("kept", () => {\n  assert.equal(c, 3);\n});\n',
+    });
+    write(repo, "src/value.test.ts", 'test("kept", () => {\n  assert.equal(c, 3);\n});\n');
+    write(repo, ".scratch/quality/allow.md", removedMarker("migrated", ["removed one"]));
+    git(repo, "add", "-A");
+    expect(rules(repo)).not.toContain("tamper/assertion-weakened");
+  });
+});
+
 describe("tamper/mock-added", () => {
   test("notes a mock whose module did not change", () => {
     const repo = tsRepo({ "src/main.ts": "export const main = 1;\n", "src/dep.ts": "export const dep = 1;\n" });
