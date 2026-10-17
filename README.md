@@ -53,6 +53,26 @@ A quality gate for coding agents: git hooks and Stop hooks that block test tampe
 
 Deterministic. Exit code 1, file and line in the report. No model is asked for an opinion.
 
+## Deleting a test, deliberately
+
+A real migration sometimes deletes tests on purpose (an old primitive is gone, not just its
+assertions). `qg:test-removed <reason>` in the commit message, or in `<out_dir>/allow.md` for
+`check --staged` and Stop, lifts `tamper/test-deleted`. To also lift `tamper/assertion-weakened`
+for the hunks that deleted those tests, name every one of them below the reason, one per line:
+
+```
+qg:test-removed migrated the queue suite off the old mock
+qg:test-removed-name old queue behavior
+qg:test-removed-name retry backoff
+```
+
+A name is the test's title for `it(...)`/`test(...)`/`describe(...)`, or the function/class name
+for a Python `def`/`class`. The exemption only covers a hunk that is a pure deletion (no added
+lines) where every removed test definition in that hunk is named; a hunk that still has added
+lines, or deletes a test that is not named, is judged as before. Python and TypeScript/JavaScript
+read test definitions; other languages keep the plain `qg:test-removed` behavior with no
+assertion-weakened exemption.
+
 ## How it works
 
 ```mermaid

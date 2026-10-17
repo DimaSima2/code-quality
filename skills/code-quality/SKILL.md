@@ -83,7 +83,7 @@ Full rule table with how each one works: [references/checks.md](references/check
 
 Every bypass needs a reason and leaves a `note: bypass <rule> <source> <reason>` line in the report.
 
-- Deleting a test block: `qg:test-removed <reason>` in the commit message (or in `<out_dir>/allow.md` for `check --staged` and Stop).
+- Deleting a test block: `qg:test-removed <reason>` in the commit message (or in `<out_dir>/allow.md` for `check --staged` and Stop). A `qg:test-removed-name <name>` line per deleted test (py, ts/js) also lifts `tamper/assertion-weakened`, but only for a hunk that is a pure deletion with every removed test named.
 - `pre-push` with no test found: `qg:no-test <reason>` in a pushed commit message.
 - A deliberate secret in a fixture: `qg:allow <reason>` or `gitleaks:allow <reason>` on the line.
 - Changing `src`, thresholds, `[security]`, `[hooks]`, `[review]`, `[knip]`, `[layers]`, `[docs]`, `[glossary] allow` together with source code is blocked; change them in a separate commit.
