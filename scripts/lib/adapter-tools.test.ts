@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { adapterChecks, adapterFindingKey, type AdapterToolKind, parseSarif, ratchetAdapterChecks } from "./adapter-tools.ts";
@@ -182,6 +182,46 @@ fi`);
     expect(rules(checks)).toEqual(["dead/vulture", "form/E722"]);
     expect(checks.map((item) => item.findings[0]?.file)).toEqual(["mod.py", "mod.py"]);
     expect(checks[1].findings[0]?.line).toBe(2);
+  });
+
+  test("vulture drops the positional path when pyproject.toml scopes [tool.vulture] paths", () => {
+    const root = repo("pyproject.toml", "[tool.vulture]\npaths = [\"src\"]\n");
+    const bin = join(root, "bin");
+    mkdirSync(bin);
+    const calls = join(root, "calls.log");
+    stub(bin, "uvx", `echo "$*" >> "${calls}"`);
+    tools(root, bin, ["dead"]);
+    expect(readFileSync(calls, "utf8").trim()).toBe("vulture");
+  });
+
+  test("vulture keeps the positional path when pyproject.toml has no [tool.vulture] paths", () => {
+    const root = repo("pyproject.toml", "[project]\nname='app'\nversion='0.1.0'\n");
+    const bin = join(root, "bin");
+    mkdirSync(bin);
+    const calls = join(root, "calls.log");
+    stub(bin, "uvx", `echo "$*" >> "${calls}"`);
+    tools(root, bin, ["dead"]);
+    expect(readFileSync(calls, "utf8").trim()).toBe("vulture .");
+  });
+
+  test("vulture keeps the positional path when [tool.vulture] has an empty paths list", () => {
+    const root = repo("pyproject.toml", "[tool.vulture]\npaths = []\n");
+    const bin = join(root, "bin");
+    mkdirSync(bin);
+    const calls = join(root, "calls.log");
+    stub(bin, "uvx", `echo "$*" >> "${calls}"`);
+    tools(root, bin, ["dead"]);
+    expect(readFileSync(calls, "utf8").trim()).toBe("vulture .");
+  });
+
+  test("vulture falls back to the positional path when pyproject.toml fails to parse", () => {
+    const root = repo("pyproject.toml", "[tool.vulture\npaths = [\"src\"\n");
+    const bin = join(root, "bin");
+    mkdirSync(bin);
+    const calls = join(root, "calls.log");
+    stub(bin, "uvx", `echo "$*" >> "${calls}"`);
+    tools(root, bin, ["dead"]);
+    expect(readFileSync(calls, "utf8").trim()).toBe("vulture .");
   });
 
   test("prints one missing-tool notice with the affected root count", () => {
