@@ -456,6 +456,50 @@ describe("tamper/assertion-weakened removal bypass", () => {
     expect(result.notices.some((n) => n.startsWith("note: bypass tamper/assertion-weakened allow.md") && n.includes("test_removed"))).toBe(true);
   });
 
+  test("still blocks a hunk whose removed lines start with a prior test's tail before a named test header", () => {
+    const repo = tsRepo({
+      "src/value.test.ts":
+        'test("kept A", () => {\n  assert.equal(a, 1);\n  assert.equal(a2, 2);\n});\ntest("removed one", () => {\n  assert.equal(b, 2);\n});\ntest("kept", () => {\n  assert.equal(c, 3);\n});\n',
+    });
+    write(repo, "src/value.test.ts", 'test("kept A", () => {\n  assert.equal(a, 1);\n});\ntest("kept", () => {\n  assert.equal(c, 3);\n});\n');
+    write(repo, ".scratch/quality/allow.md", removedMarker("migrated", ["removed one"]));
+    git(repo, "add", "-A");
+    expect(rules(repo)).toContain("tamper/assertion-weakened");
+  });
+
+  test("still blocks a hunk whose removed lines start with a prior Python test's tail before a named test header", () => {
+    const repo = langRepo("py", ["pyproject.toml", '[project]\nname = "rules"\nversion = "0.1.0"\n'], {
+      "test_value.py":
+        "def test_kept_a():\n    assert value == 1\n    assert other == 2\n\n\ndef test_removed():\n    assert value == 3\n\n\ndef test_kept():\n    assert value == 1\n",
+    });
+    write(repo, "test_value.py", "def test_kept_a():\n    assert value == 1\n\n\ndef test_kept():\n    assert value == 1\n");
+    write(repo, ".scratch/quality/allow.md", removedMarker("migrated", ["test_removed"]));
+    git(repo, "add", "-A");
+    expect(rules(repo)).toContain("tamper/assertion-weakened");
+  });
+
+  test("lifts assertion-weakened when only a comment precedes the named test header", () => {
+    const repo = tsRepo({
+      "src/value.test.ts":
+        'test("kept A", () => {\n  assert.equal(a, 1);\n});\n// removed because flaky\ntest("removed one", () => {\n  assert.equal(b, 2);\n});\ntest("kept", () => {\n  assert.equal(c, 3);\n});\n',
+    });
+    write(repo, "src/value.test.ts", 'test("kept A", () => {\n  assert.equal(a, 1);\n});\ntest("kept", () => {\n  assert.equal(c, 3);\n});\n');
+    write(repo, ".scratch/quality/allow.md", removedMarker("migrated", ["removed one"]));
+    git(repo, "add", "-A");
+    expect(rules(repo)).not.toContain("tamper/assertion-weakened");
+  });
+
+  test("lifts assertion-weakened when only a decorator and a comment precede the named Python test header", () => {
+    const repo = langRepo("py", ["pyproject.toml", '[project]\nname = "rules"\nversion = "0.1.0"\n'], {
+      "test_value.py":
+        "def test_kept_a():\n    assert value == 1\n\n\n@pytest.mark.skip\n# removed, flaky in CI\ndef test_removed():\n    assert other == 2\n\n\ndef test_kept():\n    assert value == 1\n",
+    });
+    write(repo, "test_value.py", "def test_kept_a():\n    assert value == 1\n\n\ndef test_kept():\n    assert value == 1\n");
+    write(repo, ".scratch/quality/allow.md", removedMarker("migrated", ["test_removed"]));
+    git(repo, "add", "-A");
+    expect(rules(repo)).not.toContain("tamper/assertion-weakened");
+  });
+
   test("never exempts a language with no test-definition adapter", () => {
     const repo = langRepo("go", ["go.mod", "module example.test/tamper\n"], {
       "value_test.go": "package value\nfunc TestRemoved(t *testing.T) {\n\tassert.Equal(t, 1, 1)\n\tassert.Equal(t, 2, 2)\n}\n\nfunc TestKept(t *testing.T) {\n\tassert.Equal(t, 3, 3)\n}\n",
