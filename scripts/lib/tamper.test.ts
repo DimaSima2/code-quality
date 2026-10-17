@@ -568,6 +568,114 @@ describe("tamper/assertion-weakened removal bypass", () => {
   });
 });
 
+describe("tamper/assertion-weakened removal bypass naming helpers, fixtures, stub classes, and constants", () => {
+  test("lifts assertion-weakened for a pure deletion naming a helper, a stub class, a fixture, a constant, and the tests sharing its hunk", () => {
+    const repo = langRepo("py", ["pyproject.toml", '[project]\nname = "rules"\nversion = "0.1.0"\n'], {
+      "test_value.py":
+        "@contextmanager\ndef _task():\n    yield\n\n\nclass _Clock:\n    def now(self):\n        return 1\n\n\n@pytest.fixture\ndef clock():\n    return _Clock()\n\n\n_SETSID_DEAF = True\n\n\ndef test_one():\n    assert clock\n    assert _SETSID_DEAF\n\n\ndef test_two():\n    assert clock\n\n\ndef test_kept():\n    assert True\n",
+    });
+    write(repo, "test_value.py", "def test_kept():\n    assert True\n");
+    write(
+      repo,
+      ".scratch/quality/allow.md",
+      removedMarker("migrated off the legacy harness", ["_task", "_Clock", "clock", "_SETSID_DEAF", "test_one", "test_two"]),
+    );
+    git(repo, "add", "-A");
+    const result = tamper(repo);
+    expect(result.findings.map((f) => f.rule)).not.toContain("tamper/assertion-weakened");
+    expect(result.notices.some((n) => n.startsWith("note: bypass tamper/assertion-weakened allow.md") && n.includes("3 assert"))).toBe(true);
+  });
+
+  test("still blocks that same hunk when the helper is left unnamed", () => {
+    const repo = langRepo("py", ["pyproject.toml", '[project]\nname = "rules"\nversion = "0.1.0"\n'], {
+      "test_value.py":
+        "@contextmanager\ndef _task():\n    yield\n\n\nclass _Clock:\n    def now(self):\n        return 1\n\n\n@pytest.fixture\ndef clock():\n    return _Clock()\n\n\n_SETSID_DEAF = True\n\n\ndef test_one():\n    assert clock\n    assert _SETSID_DEAF\n\n\ndef test_two():\n    assert clock\n\n\ndef test_kept():\n    assert True\n",
+    });
+    write(repo, "test_value.py", "def test_kept():\n    assert True\n");
+    write(
+      repo,
+      ".scratch/quality/allow.md",
+      removedMarker("migrated off the legacy harness", ["_Clock", "clock", "_SETSID_DEAF", "test_one", "test_two"]),
+    );
+    git(repo, "add", "-A");
+    expect(rules(repo)).toContain("tamper/assertion-weakened");
+  });
+
+  test("lifts assertion-weakened for a pure deletion of two named helpers with no test among them", () => {
+    const repo = langRepo("py", ["pyproject.toml", '[project]\nname = "rules"\nversion = "0.1.0"\n'], {
+      "test_value.py": "def helper_one():\n    assert flag_one\n\n\ndef helper_two():\n    assert flag_two\n\n\ndef test_kept():\n    assert True\n",
+    });
+    write(repo, "test_value.py", "def test_kept():\n    assert True\n");
+    write(repo, ".scratch/quality/allow.md", removedMarker("dropped dead helpers", ["helper_one", "helper_two"]));
+    git(repo, "add", "-A");
+    expect(rules(repo)).not.toContain("tamper/assertion-weakened");
+  });
+
+  test("lifts assertion-weakened for a pure deletion of a named stub class with no test", () => {
+    const repo = langRepo("py", ["pyproject.toml", '[project]\nname = "rules"\nversion = "0.1.0"\n'], {
+      "test_value.py": "class _Clock:\n    def now(self):\n        assert False\n        return 1\n\n\ndef test_kept():\n    assert True\n",
+    });
+    write(repo, "test_value.py", "def test_kept():\n    assert True\n");
+    write(repo, ".scratch/quality/allow.md", removedMarker("dropped the stub", ["_Clock"]));
+    git(repo, "add", "-A");
+    expect(rules(repo)).not.toContain("tamper/assertion-weakened");
+  });
+
+  test("lifts assertion-weakened for a pure deletion naming a helper, a stub class, a constant, and the tests sharing a TypeScript hunk", () => {
+    const repo = tsRepo({
+      "src/value.test.ts":
+        'function _task() {\n  return 1;\n}\n\n\nclass _Clock {\n  now() {\n    return 1;\n  }\n}\n\n\nconst _SETSID_DEAF = true;\n\n\ntest("removed one", () => {\n  assert.equal(a, 1);\n});\n\n\ntest("removed two", () => {\n  assert.equal(b, 2);\n});\n\n\ntest("kept", () => {\n  assert.equal(c, 3);\n});\n',
+    });
+    write(repo, "src/value.test.ts", 'test("kept", () => {\n  assert.equal(c, 3);\n});\n');
+    write(repo, ".scratch/quality/allow.md", removedMarker("migrated off the legacy harness", ["_task", "_Clock", "_SETSID_DEAF", "removed one", "removed two"]));
+    git(repo, "add", "-A");
+    expect(rules(repo)).not.toContain("tamper/assertion-weakened");
+  });
+
+  test("still blocks that same TypeScript hunk when the stub class is left unnamed", () => {
+    const repo = tsRepo({
+      "src/value.test.ts":
+        'function _task() {\n  return 1;\n}\n\n\nclass _Clock {\n  now() {\n    return 1;\n  }\n}\n\n\nconst _SETSID_DEAF = true;\n\n\ntest("removed one", () => {\n  assert.equal(a, 1);\n});\n\n\ntest("removed two", () => {\n  assert.equal(b, 2);\n});\n\n\ntest("kept", () => {\n  assert.equal(c, 3);\n});\n',
+    });
+    write(repo, "src/value.test.ts", 'test("kept", () => {\n  assert.equal(c, 3);\n});\n');
+    write(repo, ".scratch/quality/allow.md", removedMarker("migrated off the legacy harness", ["_task", "_SETSID_DEAF", "removed one", "removed two"]));
+    git(repo, "add", "-A");
+    expect(rules(repo)).toContain("tamper/assertion-weakened");
+  });
+
+  test("still blocks a hunk whose removed lines start with a prior test's tail before a named helper that follows", () => {
+    const repo = langRepo("py", ["pyproject.toml", '[project]\nname = "rules"\nversion = "0.1.0"\n'], {
+      "test_value.py":
+        "def test_kept_a():\n    assert value == 1\n    assert other == 2\n\n\ndef helper_removed():\n    assert value == 3\n\n\ndef test_kept():\n    assert value == 1\n",
+    });
+    write(repo, "test_value.py", "def test_kept_a():\n    assert value == 1\n\n\ndef test_kept():\n    assert value == 1\n");
+    write(repo, ".scratch/quality/allow.md", removedMarker("migrated", ["helper_removed"]));
+    git(repo, "add", "-A");
+    expect(rules(repo)).toContain("tamper/assertion-weakened");
+  });
+
+  test("still blocks a Python method removed from the start of a surviving class's body, even fully named", () => {
+    const repo = langRepo("py", ["pyproject.toml", '[project]\nname = "rules"\nversion = "0.1.0"\n'], {
+      "test_value.py": "class TestFoo:\n    def test_removed(self):\n        assert False\n\n    def test_kept(self):\n        assert True\n",
+    });
+    write(repo, "test_value.py", "class TestFoo:\n    def test_kept(self):\n        assert True\n");
+    write(repo, ".scratch/quality/allow.md", removedMarker("migrated", ["test_removed"]));
+    git(repo, "add", "-A");
+    expect(rules(repo)).toContain("tamper/assertion-weakened");
+  });
+
+  test("still blocks a TypeScript test removed from the start of a surviving describe block, even fully named", () => {
+    const repo = tsRepo({
+      "src/value.test.ts":
+        'describe("Foo", () => {\n  it("removed", () => {\n    assert.equal(a, 1);\n  });\n\n  it("kept", () => {\n    assert.equal(b, 2);\n  });\n});\n',
+    });
+    write(repo, "src/value.test.ts", 'describe("Foo", () => {\n  it("kept", () => {\n    assert.equal(b, 2);\n  });\n});\n');
+    write(repo, ".scratch/quality/allow.md", removedMarker("migrated", ["removed"]));
+    git(repo, "add", "-A");
+    expect(rules(repo)).toContain("tamper/assertion-weakened");
+  });
+});
+
 describe("tamper/mock-added", () => {
   test("notes a mock whose module did not change", () => {
     const repo = tsRepo({ "src/main.ts": "export const main = 1;\n", "src/dep.ts": "export const dep = 1;\n" });
