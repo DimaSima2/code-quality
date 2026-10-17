@@ -165,11 +165,29 @@ function rootCount(notice: string, count: number) {
   return notice.endsWith(")") ? `${notice.slice(0, -1)}; roots: ${count})` : `${notice}; roots: ${count}`;
 }
 
+// A positional "." on the command line overrides [tool.vulture] paths in pyproject.toml, and
+// vulture's exclude match is a substring of the resolved absolute path - excluding .worktrees/
+// there would blind every worktree checkout to its own dead code. So when the repo already scopes
+// vulture via pyproject.toml, let vulture read paths (and exclude) from there instead.
+function vultureCommand(cwd: string): string {
+  const defaultCommand = "uvx vulture .";
+  const path = join(cwd, "pyproject.toml");
+  if (!existsSync(path)) return defaultCommand;
+  try {
+    const raw = Bun.TOML.parse(readFileSync(path, "utf8")) as Record<string, any>;
+    const paths = raw.tool?.vulture?.paths;
+    return Array.isArray(paths) && paths.length ? "uvx vulture" : defaultCommand;
+  } catch {
+    return defaultCommand;
+  }
+}
+
 function runAdapter(request: RunRequest): AdapterToolCheck {
   const { o, root, kind, tool, runner, env } = request;
   const name = `${root.adapter.id}/${kind}`;
   const cwd = root.root === "." ? o.repo : join(o.repo, root.root);
-  const result = runner("sh", ["-c", tool.command], cwd, { timeout: 600_000, env });
+  const command = root.adapter.id === "py" && kind === "dead" ? vultureCommand(cwd) : tool.command;
+  const result = runner("sh", ["-c", command], cwd, { timeout: 600_000, env });
   const rule = toolRule(kind, tool);
   if (missingTool(result.code, result.err)) return missingCheck({ adapter: root.adapter.id, kind, name, rule, tool });
   return parsedCheck(request, name, cwd, result);
