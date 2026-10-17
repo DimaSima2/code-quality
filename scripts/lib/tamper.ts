@@ -357,8 +357,12 @@ function assertionOutcome(o: Opts, file: string, ctx: HunkContext, bypass: Accep
 // `qg:test-removed-name` is exempt from assertion-weakened; a mixed hunk or an unnamed definition
 // is not. "Top-level" = the indent of the hunk's own first line (L); a decorator or comment above
 // the first definition is noise, everything indented past L is that definition's body (skipped,
-// not required to be named), and a bare closing bracket/brace left over from a multi-line body is
-// noise too, once at least one definition has been found. A whole-file deletion (file no longer
+// not required to be named - including a nested def/class inside it), and a bare closing
+// bracket/brace left over from a multi-line body is noise too, once at least one definition has
+// been found. A definition header that itself wraps onto multiple lines (parameters spilling
+// past the closing paren, e.g. `) -> None:`) has its continuation consumed by paren balance, the
+// same way a multi-line decorator is, so that closing line is never mistaken for body content or
+// required to look like a bare bracket. A whole-file deletion (file no longer
 // exists in HEAD) has no neighbour whose tail could slide in under a named definition's cover, so
 // it skips the "hunk opens on a definition" guard below and tolerates other top-level statements
 // (imports, a module docstring) that are not themselves named definitions. Otherwise the check
@@ -393,7 +397,7 @@ function hunkLevel(adapter: LanguageAdapter, lines: string[]): number | null {
       continue;
     }
     if (adapter.id === "py" && raw.trim().startsWith("@")) {
-      i = skipDecorator(lines, i);
+      i = skipBalanced(lines, i);
       continue;
     }
     if (isNoiseLine(adapter, raw)) {
@@ -411,6 +415,10 @@ function hunkLevel(adapter: LanguageAdapter, lines: string[]): number | null {
 // bare closing bracket/brace at `level` is a multi-line body's tail and noise once a definition has
 // already been found; anything else at `level` must itself be a definition, or the whole hunk is
 // unrecognized - in a lenient (whole-file) scan that line is just skipped, otherwise the scan fails.
+// A definition whose own header spans multiple lines (parameter list wrapped, closing on a line
+// like `) -> None:` or `): void {`) has that continuation - up to and including the closing line -
+// consumed by the same paren-balance tracking as a decorator, so the closing line is never itself
+// required to look like a definition or a bare closing bracket.
 function removalDefinitions(adapter: LanguageAdapter, lines: string[], level: number, lenient: boolean): string[] | null {
   const defs: string[] = [];
   let i = 0;
@@ -434,7 +442,7 @@ function removalDefinitions(adapter: LanguageAdapter, lines: string[], level: nu
     }
     const trimmed = raw.trim();
     if (adapter.id === "py" && trimmed.startsWith("@")) {
-      i = skipDecorator(lines, i);
+      i = skipBalanced(lines, i);
       continue;
     }
     if (isNoiseLine(adapter, raw)) {
@@ -444,7 +452,7 @@ function removalDefinitions(adapter: LanguageAdapter, lines: string[], level: nu
     const name = definitionName(adapter, trimmed);
     if (name) {
       defs.push(name);
-      i++;
+      i = skipBalanced(lines, i);
       continue;
     }
     if (isClosingNoise(trimmed) && defs.length > 0) {
@@ -460,21 +468,33 @@ function removalDefinitions(adapter: LanguageAdapter, lines: string[], level: nu
   return defs;
 }
 
-function skipDecorator(lines: string[], i: number): number {
-  let depth = Math.max(0, parenDelta(lines[i]));
+// Tracks paren balance (quote-aware, so a `(` or `)` inside a string literal is not counted) from
+// line `i` onward, returning the index right after the line where the balance returns to zero. A
+// line whose parens already balance on their own (the common case: a decorator or a definition
+// header that fits on one line) returns `i + 1`, unchanged from a plain "next line" step.
+function skipBalanced(lines: string[], i: number): number {
+  const quote = { ch: "" };
+  let depth = Math.max(0, parenDelta(lines[i], quote));
   let j = i + 1;
   while (depth > 0 && j < lines.length) {
-    depth += parenDelta(lines[j]);
+    depth += parenDelta(lines[j], quote);
     j++;
   }
   return j;
 }
 
-function parenDelta(line: string): number {
+function parenDelta(line: string, quote: { ch: string }): number {
   let depth = 0;
-  for (const char of line) {
-    if (char === "(") depth++;
-    if (char === ")") depth--;
+  for (let k = 0; k < line.length; k++) {
+    const char = line[k];
+    if (quote.ch) {
+      if (char === "\\") k++;
+      else if (char === quote.ch) quote.ch = "";
+      continue;
+    }
+    if (char === '"' || char === "'" || char === "`") quote.ch = char;
+    else if (char === "(") depth++;
+    else if (char === ")") depth--;
   }
   return depth;
 }
