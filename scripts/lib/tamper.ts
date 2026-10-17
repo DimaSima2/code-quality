@@ -305,7 +305,11 @@ function assertionWeakened(o: Opts, ch: Changes, bypass: AcceptedBypass | null):
   const assertionsMoved = netAssertionsNonNegative(o, testChanges);
   const outcomes = testChanges.flatMap(([file, d]) => {
     const harnesses = sourceHarnesses(d.removed);
-    return d.hunks.map((h) => assertionOutcome(o, file, { h, sourceHarnessMoved: assertionsMoved && sourceHarnessRemoval(o, file, h, harnesses) }, bypass));
+    return d.hunks.map((h) => assertionOutcome(o, file, {
+      h,
+      sourceHarnessMoved: assertionsMoved && sourceHarnessRemoval(o, file, h, harnesses),
+      fileDeleted: d.deleted,
+    }, bypass));
   });
   return {
     findings: outcomes.flatMap((x) => (x.finding ? [x.finding] : [])),
@@ -333,12 +337,12 @@ function sourceHarnessRemoval(o: Opts, file: string, h: DiffHunk, harnesses: str
 }
 
 type AssertionOutcome = { finding?: Finding; note?: string };
-type HunkContext = { h: DiffHunk; sourceHarnessMoved: boolean };
+type HunkContext = { h: DiffHunk; sourceHarnessMoved: boolean; fileDeleted: boolean };
 
 function assertionOutcome(o: Opts, file: string, ctx: HunkContext, bypass: AcceptedBypass | null): AssertionOutcome {
-  const { h, sourceHarnessMoved } = ctx;
+  const { h, sourceHarnessMoved, fileDeleted } = ctx;
   const adapter = adapterForFile(o.langs, file)!;
-  const exemptDefs = assertionExemption(adapter, h, bypass);
+  const exemptDefs = assertionExemption(adapter, h, bypass, fileDeleted);
   if (exemptDefs) return exemptionOutcome(h, adapter, bypass!, exemptDefs);
   const fewer = !sourceHarnessMoved && countPattern(h.removed, adapter, "assert") > countPattern(h.added, adapter, "assert");
   const weaker = assertionReplacement(h);
@@ -349,25 +353,55 @@ function assertionOutcome(o: Opts, file: string, ctx: HunkContext, bypass: Accep
 
 // A pure-deletion hunk (no added lines) where every deleted test definition is named by
 // `qg:test-removed-name` is exempt from assertion-weakened; a mixed hunk or an unnamed test is not.
-// The hunk must also open with the first removed test's header: everything removed before it
-// may only be blank lines, comments, or decorators/annotations, never a tail of a prior test
-// (e.g. its last assertions) sliding in under the named test's cover.
-function assertionExemption(adapter: LanguageAdapter, h: DiffHunk, bypass: AcceptedBypass | null): string[] | null {
+// A whole-file deletion (file no longer exists in HEAD) has no neighbour whose tail could slide in
+// under the named test's cover, so it skips the header-opening check below. Otherwise the hunk must
+// open with the first removed test's header: everything removed before it may only be blank lines,
+// comments, or decorators/annotations, never a tail of a prior test (e.g. its last assertions).
+function assertionExemption(adapter: LanguageAdapter, h: DiffHunk, bypass: AcceptedBypass | null, fileDeleted: boolean): string[] | null {
   const names = bypass?.names ?? [];
   if (!names.length || h.added.size > 0 || h.removed.size === 0) return null;
   const defs = testDefinitionNames(adapter, h.removed);
   if (!defs || !defs.length) return null;
   if (!defs.every((name) => nameListed(names, name))) return null;
-  return hunkOpensOnHeader(adapter, h.removed) ? defs : null;
+  return fileDeleted || hunkOpensOnHeader(adapter, h.removed) ? defs : null;
 }
 
 // Noise lines (blank, comment, decorator/annotation) are allowed before the first removed test
 // header; anything else (e.g. a leftover assertion from the preceding test) blocks the exemption.
+// A Python decorator call that wraps onto multiple lines (e.g. `@pytest.mark.parametrize(` with
+// its argument list closing several lines later) keeps every continuation line as noise too, by
+// tracking paren balance from the line that opened with `@`.
 function hunkOpensOnHeader(adapter: LanguageAdapter, lines: Map<number, string>): boolean {
   const ordered = orderedLines(lines);
   const headerIndex = ordered.findIndex((line) => matchesTestPattern(adapter, "test", activeTestHeader(line)));
   if (headerIndex < 0) return false;
-  return ordered.slice(0, headerIndex).every((line) => isNoiseLine(adapter, line));
+  return allNoise(adapter, ordered.slice(0, headerIndex));
+}
+
+function allNoise(adapter: LanguageAdapter, lines: string[]): boolean {
+  let openDepth = 0;
+  for (const rawLine of lines) {
+    if (openDepth > 0) {
+      openDepth += parenDelta(rawLine);
+      continue;
+    }
+    const line = rawLine.trim();
+    if (adapter.id === "py" && line.startsWith("@")) {
+      openDepth = Math.max(0, parenDelta(rawLine));
+      continue;
+    }
+    if (!isNoiseLine(adapter, rawLine)) return false;
+  }
+  return true;
+}
+
+function parenDelta(line: string): number {
+  let depth = 0;
+  for (const char of line) {
+    if (char === "(") depth++;
+    if (char === ")") depth--;
+  }
+  return depth;
 }
 
 // Only reached for NAME_ADAPTERS ("ts", "py"); each has its own decorator/comment syntax.
