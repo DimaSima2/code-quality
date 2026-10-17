@@ -2,7 +2,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, normalize } from "node:path";
 import type { Opts } from "./config.ts";
-import type { Changes, DiffHunk } from "./diff.ts";
+import type { Changes, DiffHunk, FileDiff } from "./diff.ts";
 import { adapterById, adapterForFile, isTestFile, matchesTestPattern, type LanguageAdapter } from "./lang.ts";
 import { bypassNote, type BypassSource, type Finding, notedCheck, run } from "./util.ts";
 
@@ -52,16 +52,20 @@ function inProjectDirs(dirs: string[], file: string) {
 }
 
 export type TamperContext = { allowFile?: boolean; commitMessages?: string; configBefore?: string; configAfter?: string };
-type AcceptedBypass = { source: BypassSource; reason: string };
+// `qg:test-removed <reason>` lifts tamper/test-deleted. A `qg:test-removed-name <name>` line below it
+// (one per deleted test, "name" = title for it(...)/test(...), function/class name for py def/class)
+// also lifts tamper/assertion-weakened, but only for a pure-deletion hunk (no added lines) whose
+// every removed test definition is named; a mixed hunk or an unnamed removed test still blocks.
+type AcceptedBypass = { source: BypassSource; reason: string; names: string[] };
 
 export function tamperCheck(o: Opts, ch: Changes, context: TamperContext = {}) {
   const removed = testDeleted(ch, o);
-  const weakened = assertionWeakened(o, ch);
   const bypass = removalBypass(o, context);
-  const findings = [...(bypass ? [] : removed), ...testSkipped(o, ch), ...weakened, ...inlineSuppressions(o, ch)];
+  const weakened = assertionWeakened(o, ch, bypass);
+  const findings = [...(bypass ? [] : removed), ...testSkipped(o, ch), ...weakened.findings, ...inlineSuppressions(o, ch)];
   const bypasses = bypass ? removalBypassNotes(bypass, removed) : [];
   const baseline = baselineTouched(o, ch, context);
-  return notedCheck("tamper", [...findings, ...baseline.findings], "", [...bypasses, ...mockNotes(o, ch), ...baseline.notes]);
+  return notedCheck("tamper", [...findings, ...baseline.findings], "", [...bypasses, ...weakened.notes, ...mockNotes(o, ch), ...baseline.notes]);
 }
 
 type Comment = { line: number; text: string };
@@ -202,7 +206,12 @@ function removalBypass(o: Opts, context: TamperContext): AcceptedBypass | null {
 function markerBypass(text: string, marker: string, source: BypassSource): AcceptedBypass | null {
   const escaped = marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const reason = new RegExp(`(?:^|\\s)${escaped}\\s+([^\\r\\n]+)`, "m").exec(text)?.[1].trim();
-  return reason ? { source, reason } : null;
+  return reason ? { source, reason, names: markerNames(text, escaped) } : null;
+}
+
+function markerNames(text: string, escapedMarker: string) {
+  const re = new RegExp(`(?:^|\\s)${escapedMarker}-name\\s+([^\\r\\n]+)`, "gm");
+  return [...text.matchAll(re)].map((m) => m[1].trim()).filter(Boolean);
 }
 
 function removalBypassNotes(bypass: AcceptedBypass, removed: Finding[]) {
@@ -291,16 +300,24 @@ function skipMarker(o: Opts, file: string, text: string) {
   return matchesTestPattern(adapter, "skip", text) || matchesTestPattern(adapter, "only", text);
 }
 
-function assertionWeakened(o: Opts, ch: Changes): Finding[] {
+function assertionWeakened(o: Opts, ch: Changes, bypass: AcceptedBypass | null): { findings: Finding[]; notes: string[] } {
   const testChanges = [...ch].filter(([file]) => isTestFile(o.langs, file));
-  const assertionsMoved = testChanges.reduce((sum, [file, d]) => {
+  const assertionsMoved = netAssertionsNonNegative(o, testChanges);
+  const outcomes = testChanges.flatMap(([file, d]) => {
+    const harnesses = sourceHarnesses(d.removed);
+    return d.hunks.map((h) => assertionOutcome(o, file, { h, sourceHarnessMoved: assertionsMoved && sourceHarnessRemoval(o, file, h, harnesses) }, bypass));
+  });
+  return {
+    findings: outcomes.flatMap((x) => (x.finding ? [x.finding] : [])),
+    notes: outcomes.flatMap((x) => (x.note ? [x.note] : [])),
+  };
+}
+
+function netAssertionsNonNegative(o: Opts, testChanges: [string, FileDiff][]) {
+  return testChanges.reduce((sum, [file, d]) => {
     const adapter = adapterForFile(o.langs, file)!;
     return sum + countPattern(d.added, adapter, "assert") - countPattern(d.removed, adapter, "assert");
   }, 0) >= 0;
-  return testChanges.flatMap(([file, d]) => {
-    const harnesses = sourceHarnesses(d.removed);
-    return d.hunks.flatMap((h) => assertionFinding(o, file, h, assertionsMoved && sourceHarnessRemoval(o, file, h, harnesses)));
-  });
 }
 
 function sourceHarnesses(lines: Map<number, string>) {
@@ -315,14 +332,52 @@ function sourceHarnessRemoval(o: Opts, file: string, h: DiffHunk, harnesses: str
   return targets.length === removed && targets.every((target) => harnesses.some((name) => compact(target) === name));
 }
 
-function assertionFinding(o: Opts, file: string, h: DiffHunk, sourceHarnessMoved: boolean): Finding[] {
+type AssertionOutcome = { finding?: Finding; note?: string };
+type HunkContext = { h: DiffHunk; sourceHarnessMoved: boolean };
+
+function assertionOutcome(o: Opts, file: string, ctx: HunkContext, bypass: AcceptedBypass | null): AssertionOutcome {
+  const { h, sourceHarnessMoved } = ctx;
   const adapter = adapterForFile(o.langs, file)!;
+  const exemptDefs = assertionExemption(adapter, h, bypass);
+  if (exemptDefs) return exemptionOutcome(h, adapter, bypass!, exemptDefs);
   const fewer = !sourceHarnessMoved && countPattern(h.removed, adapter, "assert") > countPattern(h.added, adapter, "assert");
   const weaker = assertionReplacement(h);
-  if (!fewer && !weaker) return [];
+  if (!fewer && !weaker) return {};
   const why = [fewer ? "fewer assertions in hunk" : "", weaker ? "strong assertion replaced with a weak assertion" : ""].filter(Boolean).join("; ");
-  return [finding("tamper/assertion-weakened", file, h.newStart, why)];
+  return { finding: finding("tamper/assertion-weakened", file, h.newStart, why) };
 }
+
+// A pure-deletion hunk (no added lines) where every deleted test definition is named by
+// `qg:test-removed-name` is exempt from assertion-weakened; a mixed hunk or an unnamed test is not.
+function assertionExemption(adapter: LanguageAdapter, h: DiffHunk, bypass: AcceptedBypass | null): string[] | null {
+  const names = bypass?.names ?? [];
+  if (!names.length || h.added.size > 0 || h.removed.size === 0) return null;
+  const defs = testDefinitionNames(adapter, h.removed);
+  if (!defs || !defs.length) return null;
+  return defs.every((name) => nameListed(names, name)) ? defs : null;
+}
+
+function exemptionOutcome(h: DiffHunk, adapter: LanguageAdapter, bypass: AcceptedBypass, defs: string[]): AssertionOutcome {
+  const removedAsserts = countPattern(h.removed, adapter, "assert");
+  if (!removedAsserts) return {};
+  return { note: bypassNote("tamper/assertion-weakened", bypass.source, `${removedAsserts} assert(s) removed for ${defs.join(", ")}`) };
+}
+
+function nameListed(names: string[], defName: string) {
+  return names.some((name) => name === defName || name.endsWith(`::${defName}`));
+}
+
+const NAME_ADAPTERS = new Set(["ts", "py"]);
+
+// null = this language has no definition-name adapter, so no exemption is possible for it.
+function testDefinitionNames(adapter: LanguageAdapter, lines: Map<number, string>): string[] | null {
+  if (!NAME_ADAPTERS.has(adapter.id)) return null;
+  const headers = testHeaders(lines, adapter);
+  return adapter.id === "py" ? headers.map(pyDefinitionName).filter(Boolean) : headers.map(tsDefinitionName).filter(Boolean);
+}
+
+const pyDefinitionName = (line: string) => /^\s*(?:def|class)\s+(\w+)/.exec(line)?.[1] ?? "";
+const tsDefinitionName = (line: string) => /\(\s*["'`]([^"'`]+)["'`]/.exec(line)?.[1] ?? "";
 
 function assertionReplacement(h: DiffHunk) {
   const removed = joined(h.removed);
