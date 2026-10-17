@@ -31,3 +31,9 @@ The install hints below are the macOS ones; the gate prints the hint for the run
 | Ruby | `Gemfile` | Lizard CRAP, Packwerk, RuboCop, OSV | gems `packwerk`, `rubocop`; `brew install osv-scanner` |
 | C/C++ | `CMakeLists.txt`, a `Makefile` with C/C++ files | Lizard CRAP, IWYU, clang-tidy, OSV | `brew install include-what-you-use llvm osv-scanner` |
 | Dart | `pubspec.yaml` | dart analyze, dart_code_metrics, OSV; CRAP does not run yet | Dart SDK; `dart pub add --dev dart_code_metrics`; `brew install osv-scanner` |
+
+Python's `dead` runs `uvx vulture .` by default. A positional path on the command line overrides
+`[tool.vulture] paths` in `pyproject.toml`, so when that section has a non-empty `paths` list the
+gate drops the `.` and calls `uvx vulture` instead, letting vulture read `paths` (and `exclude`) from
+the config - this is also how a repo keeps worktree checkouts (`.worktrees/*`) out of the scan without
+blinding vulture to dead code inside a worktree's own `src/`.
