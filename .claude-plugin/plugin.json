@@ -1,6 +1,6 @@
 {
   "name": "code-quality",
-  "version": "1.2.2+agentura.1",
+  "version": "1.2.3+agentura.1",
   "description": "Deterministic quality gate for coding agents and git hooks",
   "author": {
     "name": "Sergey Shima"
